@@ -1,41 +1,54 @@
 import { Router } from 'express';
 import { Response, NextFunction } from 'express';
-import { 
-  getUsers, 
-  getUserProfile, 
-  getCurrentUser, 
-  registerUser, 
-  updateUserProfile, 
+
+import {
+  getUsers,
+  getUserProfile,
+  getCurrentUser,
+  registerUser,
+  updateUserProfile,
   deleteUserAccount,
-  AuthRequest, 
   login
 } from '../controllers/userController';
-import { authenticateUser, isAdmin } from '../middlewares/authMiddleware';
+
+import { authenticateUser, isAdmin, AuthRequest } from '../middlewares/authMiddleware';
 
 const router = Router();
 
-// TODO error while login/register
 // Public routes
 router.post('/register', registerUser);
-router.post('/login', login)
+router.post('/login', login);
 
-// Protected routes
+// Protected routes for any authenticated user
 router.get('/me', authenticateUser, getCurrentUser);
+
+// Update own profile
 router.put(
   '/me',
   authenticateUser,
   (req: AuthRequest, res: Response, next: NextFunction) => {
-    // Set req.params.id ke userId dari autentikasi
-    req.params.id = req.userId as string; // userId dijamin ada setelah authenticateUser
+    req.params.id = req.userId!;
     next();
   },
   updateUserProfile
 );
 
-// Admin routes
-router.get('/', authenticateUser, isAdmin, getUsers);
-router.get('/:id', authenticateUser, isAdmin, getUserProfile);
-router.put('/:id', authenticateUser, isAdmin, updateUserProfile);
-router.delete('/:id', authenticateUser, isAdmin, deleteUserAccount);
+// Delete own account
+router.delete(
+  '/me',
+  authenticateUser,
+  (req: AuthRequest, res: Response, next: NextFunction) => {
+    req.params.id = req.userId!;
+    next();
+  },
+  deleteUserAccount
+);
+
+// Admin-only routes
+router.use(authenticateUser, isAdmin);
+router.get('/', getUsers);
+router.get('/:id', getUserProfile);
+router.put('/:id', updateUserProfile);
+router.delete('/:id', deleteUserAccount);
 
 export default router;

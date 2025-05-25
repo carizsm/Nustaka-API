@@ -10,6 +10,7 @@ export interface User {
   role: 'buyer' | 'seller' | 'admin';
   status: 'active' | 'inactive' | 'banned';
   created_at: Timestamp;
+  updated_at?: Timestamp;
 }
 
 export interface UserWithId extends User {
@@ -77,8 +78,10 @@ export interface Product {
   category_id: string;
   region_id: string;
   images: string[];
+  briefHistory: string;        // ringkasan sejarah produk
   status: 'available' | 'unavailable';
   created_at: Timestamp;
+  updated_at?: Timestamp;
 }
 
 export interface ProductWithId extends Product {
@@ -89,6 +92,7 @@ export interface ProductWithId extends Product {
 export interface CartItem {
   product_id: string;
   quantity: number;
+  price_per_item: number;
   added_at: Timestamp;
 }
 
@@ -125,6 +129,7 @@ export interface Order {
   shipping_address: string;
   order_status: 'pending' | 'processing' | 'shipped' | 'delivered' | 'cancelled';
   created_at: Timestamp;
+  updated_at?: Timestamp;
 }
 
 export interface OrderWithId extends Order {

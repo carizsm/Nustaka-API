@@ -1,19 +1,16 @@
+// src/config/firebase.ts
 import * as admin from 'firebase-admin';
-import dotenv from 'dotenv';
-
-dotenv.config();
-
 import serviceAccount from './firebase-key.json';
-const firebaseConfig = {
-  credential: admin.credential.cert(serviceAccount as admin.ServiceAccount)
-};
 
-// Inisialisasi Firebase
-admin.initializeApp(firebaseConfig);
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount as admin.ServiceAccount),
+  projectId: serviceAccount.project_id,
+});
 
-// Export firestore untuk digunakan di service
-export const firestore = admin.firestore();
-export const auth = admin.auth();
-export const storage = admin.storage();
+export const db = admin.firestore();
+
+// Jika memang nanti butuh storage atau auth, Anda bisa mengekspornya kembali:
+// export const auth = admin.auth();
+// export const storage = admin.storage();
 
 export default admin;

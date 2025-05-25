@@ -1,192 +1,192 @@
 import { Request, Response } from 'express';
-import { auth } from '../config/firebase';
-import { 
-  getAllUsers, 
-  getUserById, 
-  createUser, 
-  updateUser, 
-  deleteUser, 
-  getUserByEmail 
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcrypt';
+import {
+  getAllUsers,
+  getUserById,
+  createUser,
+  updateUser,
+  deleteUser,
+  getUserByEmail
 } from '../services/userService';
 import { User } from '../interfaces';
 import { Timestamp } from 'firebase-admin/firestore';
+import { AuthRequest } from '../middlewares/authMiddleware';
 
-// Define custom request interface for authenticated routes
-export interface AuthRequest extends Request {
-  user?: User;
-  userId?: string;
-  userRole?: string;
-}
-
-// Get all users (Admin only)
-export const getUsers = async (req: Request | AuthRequest, res: Response) => {
+// GET  /api/users          — admin only
+export const getUsers = async (_req: Request, res: Response) => {
   try {
     const users = await getAllUsers();
-    res.status(200).json(users);
-  } catch (error) {
-    console.error('Error getting users:', error);
+    const safe = users.map(({ password, ...u }) => u);
+    res.status(200).json(safe);
+  } catch (err) {
+    console.error('Error getting users:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };
 
-// Get user by ID
-export const getUserProfile = async (req: AuthRequest, res: Response) => {
+// GET  /api/users/:id
+export const getUserProfile = async (
+  req: AuthRequest,
+  res: Response
+) => {
   try {
-    const userId = req.params.id;
-    const user = await getUserById(userId);
-    
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-    
-    // Don't return password in response
-    const { password, ...userWithoutPassword } = user;
-    res.status(200).json(userWithoutPassword);
-  } catch (error) {
-    console.error('Error getting user:', error);
+    const user = await getUserById(req.params.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    const { password, ...safe } = user;
+    res.json(safe);
+  } catch (err) {
+    console.error('Error getting user:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };
 
-// Get current user profile
-export const getCurrentUser = async (req: AuthRequest, res: Response) => {
+// GET  /api/users/me
+export const getCurrentUser = async (
+  req: AuthRequest,
+  res: Response
+) => {
   try {
-    // User data is attached to request by auth middleware
-    if (!req.user) {
-      return res.status(404).json({ message: 'User not found' });
+    if (!req.userId) {
+      return res.status(401).json({ message: 'Not authenticated' });
     }
-    
-    // Don't return password in response
-    const { password, ...userWithoutPassword } = req.user;
-    res.status(200).json(userWithoutPassword);
-  } catch (error) {
-    console.error('Error getting current user:', error);
+    const user = await getUserById(req.userId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    const { password, ...safe } = user;
+    res.json(safe);
+  } catch (err) {
+    console.error('Error getting current user:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };
 
-// Login user
+// POST /api/users/login
 export const login = async (req: Request, res: Response) => {
   try {
     const { email, password } = req.body;
-    
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email & password required' });
+    }
     const user = await getUserByEmail(email);
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
-    
-    // Buat custom token
-    const customToken = await auth.createCustomToken(user.id);
-    
-    res.status(200).json({
-      token: customToken,
-      user: {
-        id: user.id,
-        email: user.email,
-        role: user.role
-      }
-    });
-  } catch (error) {
-    console.error('Error logging in:', error);
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) {
+      return res.status(400).json({ message: 'Invalid credentials' });
+    }
+
+    const token = jwt.sign(
+      { id: user.id, role: user.role },
+      process.env.JWT_SECRET || 'secretkey',
+      { expiresIn: '1h' }
+    );
+    const { password: _, ...safe } = user;
+    res.json({ token, user: safe });
+  } catch (err) {
+    console.error('Login Error:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };
 
-// Register new user
-export const registerUser = async (req: AuthRequest, res: Response) => {
+// POST /api/users/register
+export const registerUser = async (req: Request, res: Response) => {
   try {
-    const { email, password, username, phone_number, address, role } = req.body;
-    
-    // Check if email already exists
-    const existingUser = await getUserByEmail(email);
-    if (existingUser) {
+    const { email, password, username, phone_number, address, role } =
+      req.body;
+    if (!email || !password || !username) {
+      return res
+        .status(400)
+        .json({ message: 'Email, password & username required' });
+    }
+
+    const existing = await getUserByEmail(email);
+    if (existing) {
       return res.status(400).json({ message: 'Email already in use' });
     }
-    
-    // Create user in Firebase Auth
-    const userRecord = await auth.createUser({
-      email,
-      password,
-      displayName: username
-    });
-    
-    // Create user in Firestore
+
+    const hashed = await bcrypt.hash(password, 10);
+    const now = Timestamp.now();
     const userData: User = {
       username,
       email,
-      password: '', // Don't store actual password in Firestore
+      password: hashed,
       phone_number,
       address,
-      role: role || 'buyer', // Default to buyer
+      role: role || 'buyer',
       status: 'active',
-      created_at: Timestamp.now()
+      created_at: now
+      // updated_at omitted on register
     };
-    
+
     const newUser = await createUser(userData);
-    
-    // Don't return password in response
-    const { password: _, ...userWithoutPassword } = newUser;
-    
+    const { password: _, ...safe } = newUser;
+
+    const token = jwt.sign(
+      { id: newUser.id, role: newUser.role },
+      process.env.JWT_SECRET || 'secretkey',
+      { expiresIn: '1h' }
+    );
+
     res.status(201).json({
-      message: 'User registered successfully',
-      user: userWithoutPassword
+      message: 'User registered',
+      user: safe,
+      token
     });
-  } catch (error) {
-    console.error('Error registering user:', error);
+  } catch (err) {
+    console.error('Register Error:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };
 
-// Update user profile
-export const updateUserProfile = async (req: AuthRequest, res: Response) => {
+// PUT /api/users/:id
+export const updateUserProfile = async (
+  req: AuthRequest,
+  res: Response
+) => {
   try {
-    const userId = req.params.id;
-    
-    // Ensure user can only update their own profile unless they're admin
-    if (req.userId !== userId && req.userRole !== 'admin') {
-      return res.status(403).json({ message: 'Forbidden: Cannot update other users' });
+    const targetId = req.params.id;
+    if (req.userId !== targetId && req.userRole !== 'admin') {
+      return res.status(403).json({ message: 'Forbidden' });
     }
-    
+
     const { username, phone_number, address } = req.body;
-    
-    // Don't allow updating email, password or role here
-    const updateData = {
+    const updateData: Partial<User> = {
       username,
       phone_number,
-      address
+      address,
+      updated_at: Timestamp.now()
     };
-    
-    const updated = await updateUser(userId, updateData);
-    
-    if (!updated) {
-      return res.status(400).json({ message: 'Failed to update user' });
+
+    const ok = await updateUser(targetId, updateData);
+    if (!ok) {
+      return res.status(400).json({ message: 'Update failed' });
     }
-    
-    res.status(200).json({ message: 'User updated successfully' });
-  } catch (error) {
-    console.error('Error updating user:', error);
+    res.json({ message: 'User updated' });
+  } catch (err) {
+    console.error('Error updating user:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };
 
-// Delete user (Admin only)
-export const deleteUserAccount = async (req: AuthRequest, res: Response) => {
+// DELETE /api/users/:id
+export const deleteUserAccount = async (
+  req: AuthRequest,
+  res: Response
+) => {
   try {
-    const userId = req.params.id;
-    
-    // Delete from Firebase Auth
-    await auth.deleteUser(userId);
-    
-    // Delete from Firestore
-    const deleted = await deleteUser(userId);
-    
-    if (!deleted) {
-      return res.status(400).json({ message: 'Failed to delete user' });
+    const targetId = req.params.id;
+    if (req.userId !== targetId && req.userRole !== 'admin') {
+      return res.status(403).json({ message: 'Forbidden' });
     }
-    
-    res.status(200).json({ message: 'User deleted successfully' });
-  } catch (error) {
-    console.error('Error deleting user:', error);
+
+    const ok = await deleteUser(targetId);
+    if (!ok) {
+      return res.status(400).json({ message: 'Delete failed' });
+    }
+    res.json({ message: 'User deleted' });
+  } catch (err) {
+    console.error('Error deleting user:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };

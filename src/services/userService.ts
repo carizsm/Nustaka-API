@@ -1,42 +1,45 @@
-import { firestore } from "../config/firebase";
-import { User, UserWithId } from "../interfaces";
+import admin from '../config/firebase';  // import default export
+import { User, UserWithId } from '../interfaces';
+
+const firestore = admin.firestore();
 
 // User Collection Reference
-const userCollection = firestore.collection("users");
+const userCollection = firestore.collection('users');
 
 // Get All Users
 export const getAllUsers = async (): Promise<UserWithId[]> => {
   const snapshot = await userCollection.get();
-  const users: UserWithId[] = snapshot.docs.map((doc) => ({
+  const users: UserWithId[] = snapshot.docs.map((doc): UserWithId => ({
     id: doc.id,
-    ...doc.data() as User
+    ...(doc.data() as User)
   }));
   return users;
 };
 
 // Get User By ID
 export const getUserById = async (id: string): Promise<UserWithId | null> => {
-  const doc = await userCollection.doc(id).get();
-  return doc.exists ? { id: doc.id, ...(doc.data() as User) } : null;
+  const docSnap = await userCollection.doc(id).get();
+  return docSnap.exists
+    ? { id: docSnap.id, ...(docSnap.data() as User) }
+    : null;
 };
 
 // Create User
 export const createUser = async (userData: User): Promise<UserWithId> => {
   const docRef = await userCollection.add(userData);
-  const userWithId: UserWithId = {
-    id: docRef.id,
-    ...userData
-  };
-  return userWithId;
+  return { id: docRef.id, ...userData };
 };
 
 // Update User
-export const updateUser = async (id: string, userData: Partial<User>): Promise<boolean> => {
+export const updateUser = async (
+  id: string,
+  userData: Partial<User>
+): Promise<boolean> => {
   try {
     await userCollection.doc(id).update(userData);
     return true;
   } catch (error) {
-    console.error("Error updating user:", error);
+    console.error('Error updating user:', error);
     return false;
   }
 };
@@ -47,16 +50,17 @@ export const deleteUser = async (id: string): Promise<boolean> => {
     await userCollection.doc(id).delete();
     return true;
   } catch (error) {
-    console.error("Error deleting user:", error);
+    console.error('Error deleting user:', error);
     return false;
   }
 };
 
 // Get User by Email
-export const getUserByEmail = async (email: string): Promise<UserWithId | null> => {
-  const snapshot = await userCollection.where("email", "==", email).limit(1).get();
+export const getUserByEmail = async (
+  email: string
+): Promise<UserWithId | null> => {
+  const snapshot = await userCollection.where('email', '==', email).limit(1).get();
   if (snapshot.empty) return null;
-  
-  const doc = snapshot.docs[0];
-  return { id: doc.id, ...(doc.data() as User) };
+  const docSnap = snapshot.docs[0];
+  return { id: docSnap.id, ...(docSnap.data() as User) };
 };
