@@ -33,13 +33,21 @@ export const createUser = async (userData: User): Promise<UserWithId> => {
 // Update User
 export const updateUser = async (
   id: string,
-  userData: Partial<User>
+  userData: Partial<User> // Menerima Partial<User> yang mungkin berisi latitude/longitude
 ): Promise<boolean> => {
   try {
-    await userCollection.doc(id).update(userData);
+    // Cek apakah user ada sebelum update
+    const userRef = userCollection.doc(id);
+    const doc = await userRef.get();
+    if (!doc.exists) {
+        console.warn(`User with ID ${id} not found for update.`);
+        return false; // User tidak ditemukan
+    }
+
+    await userRef.update(userData); // userData akan berisi field baru jika dikirim dari controller
     return true;
   } catch (error) {
-    console.error('Error updating user:', error);
+    console.error(`Error updating user ${id}:`, error);
     return false;
   }
 };

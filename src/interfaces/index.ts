@@ -9,6 +9,8 @@ export interface User {
   address: string;
   role: 'buyer' | 'seller' | 'admin';
   status: 'active' | 'inactive' | 'banned';
+  latitude?: number;
+  longitude?: number;
   created_at: Timestamp;
   updated_at?: Timestamp;
 }
@@ -142,8 +144,10 @@ export interface Review {
   product_id: string;
   buyer_id: string;
   rating: number;
-  comment: string;
+  comment: string;// --- TAMBAHKAN FIELD INI ---
+  image_url?: string; // Opsional, URL gambar review dari Supabase
   created_at: Timestamp;
+  // updated_at?: Timestamp; // Jika review bisa diupdate
 }
 
 export interface ReviewWithId extends Review {
