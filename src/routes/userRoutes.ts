@@ -1,6 +1,6 @@
+// src/routes/userRoutes.ts
 import { Router } from 'express';
-import { Response, NextFunction } from 'express';
-
+// Impor semua fungsi controller yang dibutuhkan
 import {
   getUsers,
   getUserProfile,
@@ -8,47 +8,44 @@ import {
   registerUser,
   updateUserProfile,
   deleteUserAccount,
-  login
-} from '../controllers/userController';
+  login,
+  logoutUser
+} from '../controllers/userController'; 
 
-import { authenticateUser, isAdmin, AuthRequest } from '../middlewares/authMiddleware';
-
+// Impor middleware
+import { authenticateUser, isAdmin } from '../middlewares/authMiddleware'; 
 const router = Router();
 
-// Public routes
+// Rute Publik
 router.post('/register', registerUser);
 router.post('/login', login);
 
-// Protected routes for any authenticated user
+router.post('/logout', authenticateUser, logoutUser); 
+
+// Rute Terproteksi untuk semua user yang terautentikasi
 router.get('/me', authenticateUser, getCurrentUser);
 
-// Update own profile
+// Update profil sendiri (menggunakan req.userId dari token)
 router.put(
   '/me',
   authenticateUser,
-  (req: AuthRequest, res: Response, next: NextFunction) => {
-    req.params.id = req.userId!;
-    next();
-  },
-  updateUserProfile
+  updateUserProfile 
 );
 
-// Delete own account
+// Delete akun sendiri
 router.delete(
   '/me',
   authenticateUser,
-  (req: AuthRequest, res: Response, next: NextFunction) => {
-    req.params.id = req.userId!;
-    next();
-  },
   deleteUserAccount
 );
 
-// Admin-only routes
-router.use(authenticateUser, isAdmin);
-router.get('/', getUsers);
-router.get('/:id', getUserProfile);
-router.put('/:id', updateUserProfile);
-router.delete('/:id', deleteUserAccount);
+
+// Rute Khusus Admin (dikelompokkan setelah middleware admin)
+router.use(authenticateUser, isAdmin); // Middleware ini berlaku untuk semua route di bawahnya
+
+router.get('/', getUsers); // Admin mendapatkan semua user
+router.get('/:id', getUserProfile); // Admin mendapatkan profil user spesifik
+router.put('/:id', updateUserProfile); // Admin mengupdate profil user spesifik
+router.delete('/:id', deleteUserAccount); // Admin menghapus user spesifik
 
 export default router;

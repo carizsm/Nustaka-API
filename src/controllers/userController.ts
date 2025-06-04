@@ -14,23 +14,20 @@ import { User } from '../interfaces';
 import { Timestamp } from 'firebase-admin/firestore';
 import { AuthRequest } from '../middlewares/authMiddleware';
 
-// Helper function untuk konversi string durasi ke detik (sederhana)
-// Anda bisa membuat ini lebih canggih atau menggunakan library jika perlu format lebih banyak
+// Helper function untuk konversi string durasi ke detik (jika belum ada dari sebelumnya)
 const parseDurationToSeconds = (durationStr: string): number => {
-  if (!isNaN(Number(durationStr))) { // Jika sudah berupa angka (string)
+  if (!isNaN(Number(durationStr))) {
     return parseInt(durationStr, 10);
   }
   const unit = durationStr.charAt(durationStr.length - 1).toLowerCase();
   const value = parseInt(durationStr.substring(0, durationStr.length - 1), 10);
-
-  if (isNaN(value)) return 24 * 60 * 60; // Default 1 hari jika format tidak dikenal
-
+  if (isNaN(value)) return 24 * 60 * 60; // Default 1 hari
   switch (unit) {
     case 's': return value;
     case 'm': return value * 60;
     case 'h': return value * 60 * 60;
     case 'd': return value * 24 * 60 * 60;
-    default: return 24 * 60 * 60; // Default 1 hari
+    default: return 24 * 60 * 60;
   }
 };
 
@@ -105,21 +102,14 @@ export const login = async (req: Request, res: Response) => {
 
     const jwtPayload = { id: user.id, role: user.role };
     const jwtSecret: jwt.Secret = process.env.JWT_SECRET || 'yourDefaultSecureSecretFallback';
-    
-    // --- PERBAIKAN BAGIAN expiresIn ---
-    const expiresInDurationString = process.env.JWT_EXPIRES_IN || '1d'; // Misal: '1d', '24h', '86400' (detik)
+    const expiresInDurationString = process.env.JWT_EXPIRES_IN || '1d';
     const expiresInSeconds = parseDurationToSeconds(expiresInDurationString);
-    // --- SELESAI PERBAIKAN BAGIAN expiresIn ---
-
     const jwtOptions: jwt.SignOptions = {
-      expiresIn: expiresInSeconds, // Sekarang berupa angka (detik)
+      expiresIn: expiresInSeconds,
     };
-
     const token = jwt.sign(jwtPayload, jwtSecret, jwtOptions);
-
     const { password, ...safeUser } = user;
     res.json({ token, user: safeUser });
-
   } catch (err: any) {
     console.error('Login Error:', err);
     res.status(500).json({ message: 'Server error during login.', error: err.message });
@@ -143,28 +133,22 @@ export const registerUser = async (req: Request, res: Response) => {
     }
 
     const hashedPassword = await bcrypt.hash(plainPassword, 12);
-    
     const newUserInput: Omit<User, 'id' | 'created_at' | 'updated_at' | 'password'> & { password?: string } = {
       username, email, password: hashedPassword, phone_number: phone_number || '',
       address: address || '', role: (role === 'seller' || role === 'admin') ? role : 'buyer',
       status: 'active',
     };
 
-    const createdUser = await createUser(newUserInput as User);
+    const createdUser = await createUser(newUserInput as User); // Service akan handle created_at/updated_at
     const { password, ...safeUser } = createdUser;
 
     const jwtPayload = { id: createdUser.id, role: createdUser.role };
     const jwtSecret: jwt.Secret = process.env.JWT_SECRET || 'yourDefaultSecureSecretFallback';
-
-    // --- PERBAIKAN BAGIAN expiresIn ---
     const expiresInDurationString = process.env.JWT_EXPIRES_IN || '1d';
     const expiresInSeconds = parseDurationToSeconds(expiresInDurationString);
-    // --- SELESAI PERBAIKAN BAGIAN expiresIn ---
-
     const jwtOptions: jwt.SignOptions = {
-      expiresIn: expiresInSeconds, // Sekarang berupa angka (detik)
+      expiresIn: expiresInSeconds,
     };
-
     const token = jwt.sign(jwtPayload, jwtSecret, jwtOptions);
 
     res.status(201).json({
@@ -176,35 +160,54 @@ export const registerUser = async (req: Request, res: Response) => {
   }
 };
 
-// --- Fungsi updateUserProfile dan deleteUserAccount tetap sama dari revisi sebelumnya ---
+// --- FUNGSI BARU UNTUK LOGOUT ---
+export const logoutUser = async (req: AuthRequest, res: Response) => {
+    // Untuk sistem JWT stateless murni, backend tidak perlu melakukan banyak hal.
+    // Klien bertanggung jawab untuk menghapus token.
+    // Endpoint ini bisa digunakan untuk:
+    // 1. Konfirmasi.
+    // 2. Jika ada mekanisme server-side (misal, token denylist, refresh token), bisa dihandle di sini.
+    //    Untuk saat ini, kita buat sederhana.
+    try {
+        // Jika Anda ingin mencatat aktivitas logout, bisa dilakukan di sini.
+        // Contoh: await userService.logUserActivity(req.userId, 'logout');
+        
+        // Tidak ada token yang perlu dihapus di sisi server untuk JWT access token biasa.
+        // Jika Anda menggunakan refresh token yang disimpan di DB, Anda bisa menghapusnya di sini.
+
+        res.status(200).json({ message: 'Logout successful. Please clear your token on the client-side.' });
+    } catch (err: any) {
+        console.error('Logout Error:', err);
+        res.status(500).json({ message: 'Server error during logout.', error: err.message });
+    }
+};
+// --- AKHIR FUNGSI BARU ---
+
+
+// PUT /api/users/me (atau /api/users/:id oleh admin)
 export const updateUserProfile = async ( req: AuthRequest, res: Response ) => {
   try {
     const targetId = req.params.id || req.userId; 
-
     if (!targetId) {
         return res.status(400).json({ message: 'Target user ID is missing.' });
     }
     if (req.userId !== targetId && req.userRole !== 'admin') {
       return res.status(403).json({ message: 'Forbidden: You can only update your own profile.' });
     }
-
     const {
         username, phone_number, address, latitude, longitude
     } = req.body;
-
     const updateData: Partial<User> = {};
-
     if (username !== undefined) updateData.username = username;
     if (phone_number !== undefined) updateData.phone_number = phone_number;
     if (address !== undefined) updateData.address = address;
-
     if (latitude !== undefined || longitude !== undefined) {
       if (latitude === undefined || longitude === undefined) {
         return res.status(400).json({ message: 'Both latitude and longitude are required if one is provided.' });
       }
       const lat = parseFloat(latitude);
       const lon = parseFloat(longitude);
-      if (isNaN(lat) || isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon < -180 || lon > 180) { // Perbaikan kecil: lon < -180
+      if (isNaN(lat) || isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
         return res.status(400).json({
           message: 'Invalid latitude or longitude values. Latitude must be -90 to 90, Longitude must be -180 to 180.'
         });
@@ -212,13 +215,11 @@ export const updateUserProfile = async ( req: AuthRequest, res: Response ) => {
       updateData.latitude = lat;
       updateData.longitude = lon;
     }
-    
     if (Object.keys(updateData).length === 0) {
         return res.status(400).json({ message: 'No valid fields provided for update.' });
     }
-    
+    // updated_at akan dihandle oleh service updateUser
     const success = await updateUser(targetId, updateData);
-
     if (!success) {
       const userExists = await getUserById(targetId);
       if (!userExists) {
@@ -226,31 +227,28 @@ export const updateUserProfile = async ( req: AuthRequest, res: Response ) => {
       }
       return res.status(400).json({ message: 'Update failed. Please try again or check input data.' });
     }
-
     const updatedUser = await getUserById(targetId); 
     if (updatedUser) {
         const { password, ...safeUser } = updatedUser;
         return res.json({ message: 'User profile updated successfully.', user: safeUser });
     }
     return res.json({ message: 'User profile updated successfully but could not fetch updated details immediately.' });
-
   } catch (err: any) {
     console.error('Error updating user profile:', err);
     res.status(500).json({ message: 'Server error while updating profile.', error: err.message });
   }
 };
 
+// DELETE /api/users/:id
 export const deleteUserAccount = async ( req: AuthRequest, res: Response ) => {
   try {
     const targetId = req.params.id || req.userId;
-
     if (!targetId) {
         return res.status(400).json({ message: 'Target user ID is missing.' });
     }
     if (req.userId !== targetId && req.userRole !== 'admin') {
       return res.status(403).json({ message: 'Forbidden: You can only delete your own account.' });
     }
-    
     const success = await deleteUser(targetId);
     if (!success) {
       const userExists = await getUserById(targetId);
