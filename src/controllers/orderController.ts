@@ -4,9 +4,29 @@ import { AuthRequest } from '../middlewares/authMiddleware';
 import * as svc from '../services/orderService';
 
 export const getOrders = async (req: AuthRequest, res: Response) => {
-  const buyerId = req.userId!;  
-  const orders = await svc.listOrders(buyerId);
-  res.json(orders);
+    try {
+        const userRole = req.userRole; // Diambil dari token oleh authMiddleware
+        const userId = req.userId;
+
+        if (userRole === 'admin') {
+            const { page, limit } = req.query;
+            const allOrders = await svc.listAllOrders(
+                Number(page) || 1, 
+                Number(limit) || 10
+            );
+            return res.json(allOrders);
+        } else {
+            if (!userId) {
+                return res.status(401).json({ message: "User ID not found in token." });
+            }
+            const userOrders = await svc.listOrders(userId);
+            return res.json(userOrders);
+        }
+
+    } catch (error: any) {
+        console.error("Controller Error - getOrders:", error);
+        res.status(500).json({ message: error.message || "Failed to fetch orders." });
+    }
 };
 
 export const getOrderById = async (req: AuthRequest, res: Response) => {

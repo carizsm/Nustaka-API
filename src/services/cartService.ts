@@ -1,6 +1,8 @@
 // services/cartService.ts
 import admin from '../config/firebase';
-import { CartItemWithId, CartItem, Product, ProductWithId } from '../interfaces'; // Tambahkan Product, ProductWithId
+import { FieldPath } from 'firebase-admin/firestore';
+import { Timestamp } from 'firebase-admin/firestore'; 
+import { CartItemWithId, CartItem, Product, QueryResult, ProductWithId } from '../interfaces'; // Tambahkan Product, ProductWithId
 
 const db = admin.firestore();
 const productsCollection = db.collection('products');
@@ -10,14 +12,70 @@ export interface EnrichedCartItem extends CartItemWithId {
         name: string;
         images: string[]; 
     };
+    buyerId?: string; 
 }
+
+export const listAllCartItems = async (
+    page: number = 1,
+    limit: number = 10
+): Promise<QueryResult<EnrichedCartItem>> => {
+    const offset = (page - 1) * limit;
+
+    const itemsCollectionGroup = db.collectionGroup('items');
+
+    const totalSnap = await itemsCollectionGroup.get();
+    const total = totalSnap.size;
+
+    const dataQuery = itemsCollectionGroup
+        .where('quantity', '>', 0)
+        .orderBy('quantity', 'asc')
+        .orderBy('added_at', 'desc')
+        .offset(offset)
+        .limit(limit);
+
+    const dataSnap = await dataQuery.get();
+
+    // Proses untuk memperkaya setiap item dengan detail produk dan buyerId
+    const enrichedItemsPromises = dataSnap.docs.map(async (doc): Promise<EnrichedCartItem> => {
+        const itemData = doc.data() as CartItem;
+        // Untuk mendapatkan buyerId, kita ambil ID dari dokumen parent dari sub-koleksi 'items'
+        const buyerId = doc.ref.parent.parent!.id; 
+
+        const enrichedItem: EnrichedCartItem = {
+            id: doc.id,
+            cart_id: buyerId,
+            buyerId: buyerId, 
+            ...itemData,
+        };
+
+        if (itemData.product_id) {
+            try {
+                const productSnap = await productsCollection.doc(itemData.product_id).get();
+                if (productSnap.exists) {
+                    const productData = productSnap.data() as Product;
+                    enrichedItem.productDetails = {
+                        name: productData.name,
+                        images: productData.images,
+                    };
+                }
+            } catch (error) {
+                console.error(`Error fetching product details for cart item ${doc.id}:`, error);
+            }
+        }
+        return enrichedItem;
+    });
+
+    const data = await Promise.all(enrichedItemsPromises);
+
+    return { data, total, page, limit };
+};
 
 export const getCart = async (buyerId: string): Promise<EnrichedCartItem[]> => {
     const itemsSnap = await db
         .collection('carts')
         .doc(buyerId)
         .collection('items')
-        .orderBy('added_at', 'desc') // Urutkan berdasarkan kapan ditambahkan
+        //.orderBy('added_at', 'desc') // Urutkan berdasarkan kapan ditambahkan
         .get();
 
     if (itemsSnap.empty) {
@@ -55,37 +113,52 @@ export const getCart = async (buyerId: string): Promise<EnrichedCartItem[]> => {
     return Promise.all(enrichedItemsPromises);
 };
 
-// Add item to cart: automatically fetches product price
 export const addToCart = async (
   buyerId: string,
   productId: string,
   qty: number
 ): Promise<CartItemWithId> => {
-  // Ambil data produk untuk mendapatkan price_per_item
-  const prodDoc = await db.collection('products').doc(productId).get();
+  const prodDoc = await productsCollection.doc(productId).get();
   if (!prodDoc.exists) {
     throw new Error('Product not found');
   }
   const product = prodDoc.data() as Product;
   const pricePerItem = product.price;
 
-  const payload: CartItem = {
+  // Kita akan cek apakah item ini sudah ada di keranjang untuk di-update, bukan membuat duplikat
+  const itemsCollectionRef = db.collection('carts').doc(buyerId).collection('items');
+  const existingItemQuery = await itemsCollectionRef.where('product_id', '==', productId).limit(1).get();
+
+  if (!existingItemQuery.empty) {
+    // Jika item sudah ada, update kuantitasnya
+    const existingItemDoc = existingItemQuery.docs[0];
+    const existingItemData = existingItemDoc.data() as CartItem;
+    const newQuantity = existingItemData.quantity + qty;
+    
+    await existingItemDoc.ref.update({ quantity: newQuantity });
+    
+    return {
+      id: existingItemDoc.id,
+      cart_id: buyerId,
+      ...existingItemDoc.data(),
+      quantity: newQuantity, // Kembalikan kuantitas baru
+    } as CartItemWithId;
+  }
+
+  // Jika item belum ada, buat baru
+  const payload: Omit<CartItem, 'id'> = { // Gunakan Omit untuk kejelasan tipe
     product_id: productId,
     quantity: qty,
     price_per_item: pricePerItem,
-    added_at: new Date() as any
+    added_at: Timestamp.now() // WAJIB ADA: Gunakan Timestamp.now() dari 'firebase-admin/firestore'
   };
 
-  const docRef = await db
-    .collection('carts')
-    .doc(buyerId)
-    .collection('items')
-    .add(payload);
+  const docRef = await itemsCollectionRef.add(payload);
 
   return {
     id: docRef.id,
     cart_id: buyerId,
-    ...payload
+    ...(payload as CartItem)
   };
 };
 

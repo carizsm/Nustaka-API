@@ -8,6 +8,7 @@ import {
     CartItem,
     // CartItemWithId, // Tidak dipakai langsung di getOrder atau listOrders
     Product, // Tambahkan Product
+    QueryResult,
     ProductWithId // Tambahkan ProductWithId
 } from '../interfaces';
 
@@ -15,8 +16,31 @@ const db = admin.firestore();
 const productsCollection = db.collection('products'); // Referensi ke koleksi produk
 const FieldValue = admin.firestore.FieldValue;
 
+export const listAllOrders = async (
+    page: number = 1,
+    limit: number = 10
+): Promise<QueryResult<OrderWithId>> => {
+    const offset = (page - 1) * limit;
 
-// Definisikan tipe baru untuk item order yang diperkaya
+    // Query untuk menghitung total semua dokumen
+    const totalSnap = await productsCollection.get();
+    const total = totalSnap.size;
+
+    // Query untuk mengambil data dengan paginasi dan diurutkan dari yang terbaru
+    const dataSnap = await productsCollection
+        .orderBy('created_at', 'desc')
+        .offset(offset)
+        .limit(limit)
+        .get();
+
+    const data: OrderWithId[] = dataSnap.docs.map(doc => ({
+        id: doc.id,
+        ...(doc.data() as Order)
+    }));
+
+    return { data, total, page, limit };
+};
+
 export interface EnrichedOrderItem extends OrderItemWithId {
     productDetails?: { // Informasi produk yang disematkan
         name: string;

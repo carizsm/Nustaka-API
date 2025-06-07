@@ -3,10 +3,29 @@ import { AuthRequest } from '../middlewares/authMiddleware';
 import * as svc from '../services/cartService';
 
 export const getCart = async (req: AuthRequest, res: Response) => {
-  // Setelah authenticateUser, userId pasti terisi
-  const buyerId = req.userId!;  
-  const items = await svc.getCart(buyerId);
-  res.json(items);
+    try {
+        const userRole = req.userRole;
+        const userId = req.userId;
+
+        if (userRole === 'admin') {
+            const { page, limit } = req.query;
+            const allCartItemsResult = await svc.listAllCartItems(
+                Number(page) || 1,
+                Number(limit) || 10
+            );
+            return res.status(200).json(allCartItemsResult);
+        } else {
+            if (!userId) {
+                // Pengaman, meskipun middleware seharusnya sudah memastikan userId ada
+                return res.status(401).json({ message: "Authentication error: User ID not found in token." });
+            }
+            const userCartItems = await svc.getCart(userId);
+            return res.status(200).json(userCartItems);
+        }
+    } catch (error: any) {
+        console.error("Controller Error - getCart:", error);
+        res.status(500).json({ message: error.message || "Failed to fetch cart data." });
+    }
 };
 
 export const addToCart = async (req: AuthRequest, res: Response) => {
