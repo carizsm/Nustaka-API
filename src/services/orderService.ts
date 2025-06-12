@@ -7,36 +7,102 @@ import {
     OrderItem,
     CartItem,
     // CartItemWithId, // Tidak dipakai langsung di getOrder atau listOrders
-    Product, // Tambahkan Product
+    Product,
     QueryResult,
-    ProductWithId // Tambahkan ProductWithId
+    User,
+    ProductWithId
 } from '../interfaces';
 
 const db = admin.firestore();
-const productsCollection = db.collection('products'); // Referensi ke koleksi produk
+const productsCollection = db.collection('products');
+const ordersCollection = db.collection('orders');
+const usersCollection = db.collection('users');
 const FieldValue = admin.firestore.FieldValue;
+
+export interface AdminEnrichedOrder extends OrderWithId {
+    buyerInfo?: {
+        id: string;
+        username: string;
+        email: string;
+    }
+    itemsSummary?: {
+        totalItems: number;
+        productNames: string[]; // Daftar nama produk dalam pesanan
+    }
+}
 
 export const listAllOrders = async (
     page: number = 1,
     limit: number = 10
-): Promise<QueryResult<OrderWithId>> => {
+): Promise<QueryResult<AdminEnrichedOrder>> => {
     const offset = (page - 1) * limit;
 
-    // Query untuk menghitung total semua dokumen
-    const totalSnap = await productsCollection.get();
+    const totalSnap = await ordersCollection.get();
     const total = totalSnap.size;
 
-    // Query untuk mengambil data dengan paginasi dan diurutkan dari yang terbaru
-    const dataSnap = await productsCollection
+    const dataSnap = await ordersCollection
         .orderBy('created_at', 'desc')
         .offset(offset)
         .limit(limit)
         .get();
 
-    const data: OrderWithId[] = dataSnap.docs.map(doc => ({
-        id: doc.id,
-        ...(doc.data() as Order)
-    }));
+    const enrichmentPromises = dataSnap.docs.map(async (doc): Promise<AdminEnrichedOrder> => {
+        const orderData = doc.data() as Order;
+        const orderId = doc.id;
+        
+        let buyerInfo;
+        if (orderData.buyer_id && typeof orderData.buyer_id === 'string' && orderData.buyer_id.length > 0) {
+            try {
+                const userSnap = await usersCollection.doc(orderData.buyer_id).get();
+                if (userSnap.exists) {
+                    const userData = userSnap.data() as User;
+                    buyerInfo = {
+                        id: orderData.buyer_id,
+                        username: userData.username,
+                        email: userData.email
+                    };
+                }
+            } catch (e) { console.error(`Failed to fetch buyer info for order ${orderId}`, e); }
+        }
+
+        let itemsSummary;
+        try {
+            const itemsSnap = await ordersCollection.doc(orderId).collection('items').get();
+            if (!itemsSnap.empty) {
+                const productIds = itemsSnap.docs.map(itemDoc => (itemDoc.data() as OrderItem).product_id);
+                
+                const productNames: string[] = [];
+                if (productIds.length > 0) {
+                    const productSnaps = await db.collection('products').where(admin.firestore.FieldPath.documentId(), 'in', productIds).get();
+                    const productDataMap = new Map(productSnaps.docs.map(pDoc => [pDoc.id, pDoc.data() as Product]));
+                    productIds.forEach(pId => {
+                        const product = productDataMap.get(pId);
+                        if (product) {
+                            productNames.push(product.name);
+                        } else {
+                            productNames.push("[Product Not Found]");
+                        }
+                    });
+                }
+                
+                itemsSummary = {
+                    totalItems: itemsSnap.size,
+                    productNames: productNames
+                };
+            } else {
+                itemsSummary = { totalItems: 0, productNames: [] };
+            }
+        } catch (e) { console.error(`Failed to fetch items for order ${orderId}`, e); }
+
+        return {
+            id: orderId,
+            ...orderData,
+            buyerInfo: buyerInfo,
+            itemsSummary: itemsSummary
+        };
+    });
+
+    const data = await Promise.all(enrichmentPromises);
 
     return { data, total, page, limit };
 };
