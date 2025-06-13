@@ -11,6 +11,11 @@ export interface User {
   status: 'active' | 'inactive' | 'banned';
   latitude?: number;
   longitude?: number;
+  name?: string;
+  bio?: string;
+  gender?: 'male' | 'female' | 'other' | 'private';
+  birth_date?: Timestamp;
+  profile_picture_url?: string;
   created_at: Timestamp;
   updated_at?: Timestamp;
 }

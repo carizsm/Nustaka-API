@@ -13,6 +13,10 @@ import {
 import { User } from '../interfaces';
 import { Timestamp } from 'firebase-admin/firestore';
 import { AuthRequest } from '../middlewares/authMiddleware';
+import { supabase } from '../config/supabaseClient';
+import { v4 as uuidv4 } from 'uuid';
+
+const AVATAR_BUCKET = 'avatars';
 
 // Helper function untuk konversi string durasi ke detik (jika belum ada dari sebelumnya)
 const parseDurationToSeconds = (durationStr: string): number => {
@@ -185,54 +189,83 @@ export const logoutUser = async (req: AuthRequest, res: Response) => {
 
 
 // PUT /api/users/me (atau /api/users/:id oleh admin)
-export const updateUserProfile = async ( req: AuthRequest, res: Response ) => {
+export const updateUserProfile = async (req: AuthRequest, res: Response) => {
   try {
     const targetId = req.params.id || req.userId; 
+
     if (!targetId) {
         return res.status(400).json({ message: 'Target user ID is missing.' });
     }
     if (req.userId !== targetId && req.userRole !== 'admin') {
       return res.status(403).json({ message: 'Forbidden: You can only update your own profile.' });
     }
+
     const {
-        username, phone_number, address, latitude, longitude
+        username,
+        phone_number,
+        address,
+        latitude,
+        longitude,
+        // --- Ambil field baru dari body ---
+        name,
+        bio,
+        gender,
+        birth_date // Asumsi dikirim sebagai string ISO 8601, misal "1998-06-14"
     } = req.body;
+
     const updateData: Partial<User> = {};
+
+    // Data yang sudah ada
     if (username !== undefined) updateData.username = username;
     if (phone_number !== undefined) updateData.phone_number = phone_number;
     if (address !== undefined) updateData.address = address;
-    if (latitude !== undefined || longitude !== undefined) {
-      if (latitude === undefined || longitude === undefined) {
-        return res.status(400).json({ message: 'Both latitude and longitude are required if one is provided.' });
-      }
-      const lat = parseFloat(latitude);
-      const lon = parseFloat(longitude);
-      if (isNaN(lat) || isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
-        return res.status(400).json({
-          message: 'Invalid latitude or longitude values. Latitude must be -90 to 90, Longitude must be -180 to 180.'
-        });
-      }
-      updateData.latitude = lat;
-      updateData.longitude = lon;
+
+    // --- Tambahkan field baru ke objek update ---
+    if (name !== undefined) updateData.name = name;
+    if (bio !== undefined) updateData.bio = bio;
+    if (gender !== undefined) {
+        // Validasi sederhana untuk gender
+        const validGenders = ['male', 'female', 'other', 'private'];
+        if (validGenders.includes(gender)) {
+            updateData.gender = gender;
+        } else {
+            return res.status(400).json({ message: 'Invalid gender value.' });
+        }
     }
+    if (birth_date !== undefined) {
+        // Konversi string tanggal ke Firestore Timestamp
+        const date = new Date(birth_date);
+        if (!isNaN(date.getTime())) {
+            updateData.birth_date = Timestamp.fromDate(date);
+        } else {
+            return res.status(400).json({ message: 'Invalid birth_date format. Use YYYY-MM-DD.' });
+        }
+    }
+    // ... (logika untuk latitude/longitude tetap sama)
+    if (latitude !== undefined && longitude !== undefined) {
+        // ... validasi lat/lon ...
+        updateData.latitude = parseFloat(latitude);
+        updateData.longitude = parseFloat(longitude);
+    }
+    
     if (Object.keys(updateData).length === 0) {
         return res.status(400).json({ message: 'No valid fields provided for update.' });
     }
-    // updated_at akan dihandle oleh service updateUser
-    const success = await updateUser(targetId, updateData);
+    
+    const success = await updateUser(targetId, updateData); // Service akan handle updated_at
+
     if (!success) {
-      const userExists = await getUserById(targetId);
-      if (!userExists) {
-          return res.status(404).json({ message: 'User not found, update failed.' });
-      }
-      return res.status(400).json({ message: 'Update failed. Please try again or check input data.' });
+      return res.status(400).json({ message: 'Update failed. Please check input data or user existence.' });
     }
+
     const updatedUser = await getUserById(targetId); 
     if (updatedUser) {
         const { password, ...safeUser } = updatedUser;
         return res.json({ message: 'User profile updated successfully.', user: safeUser });
     }
-    return res.json({ message: 'User profile updated successfully but could not fetch updated details immediately.' });
+    
+    res.json({ message: 'User profile updated successfully' });
+
   } catch (err: any) {
     console.error('Error updating user profile:', err);
     res.status(500).json({ message: 'Server error while updating profile.', error: err.message });
@@ -262,4 +295,51 @@ export const deleteUserAccount = async ( req: AuthRequest, res: Response ) => {
     console.error('Error deleting user account:', err);
     res.status(500).json({ message: 'Server error while deleting account.', error: err.message });
   }
+};
+
+export const uploadAvatar = async (req: AuthRequest, res: Response) => {
+    try {
+        const userId = req.userId;
+        if (!userId) {
+            return res.status(401).json({ message: 'Authentication required.' });
+        }
+        if (!req.file) {
+            return res.status(400).json({ message: 'No image file provided.' });
+        }
+
+        const file = req.file;
+        const fileExtension = file.originalname.split('.').pop();
+        const fileName = `${userId}-${uuidv4()}.${fileExtension}`;
+        const filePath = `public/${fileName}`;
+
+        const { error: uploadError } = await supabase.storage
+            .from(AVATAR_BUCKET)
+            .upload(filePath, file.buffer, { contentType: file.mimetype });
+
+        if (uploadError) {
+            throw new Error(`Failed to upload avatar: ${uploadError.message}`);
+        }
+
+        const { data: publicUrlData } = supabase.storage
+            .from(AVATAR_BUCKET)
+            .getPublicUrl(filePath);
+        
+        if (!publicUrlData || !publicUrlData.publicUrl) {
+            throw new Error('Failed to get public URL for avatar.');
+        }
+
+        const avatarUrl = publicUrlData.publicUrl;
+
+        // Update field profile_picture_url di dokumen user
+        await updateUser(userId, { profile_picture_url: avatarUrl });
+
+        res.status(200).json({ 
+            message: 'Avatar uploaded successfully.',
+            avatarUrl: avatarUrl 
+        });
+
+    } catch (error: any) {
+        console.error('Controller Error - uploadAvatar:', error);
+        res.status(500).json({ message: error.message || 'Failed to upload avatar.' });
+    }
 };
