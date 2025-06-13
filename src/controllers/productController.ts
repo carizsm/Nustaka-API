@@ -1,6 +1,10 @@
 import { Request, Response } from 'express';
 import { AuthRequest } from '../middlewares/authMiddleware';
 import * as productService from '../services/productService';
+import { supabase } from '../config/supabaseClient';
+import { v4 as uuidv4 } from 'uuid';
+
+const PRODUCT_IMAGES_BUCKET = 'product-images'; // <-- Ganti dengan nama bucket Anda untuk gambar produk
 
 // Helper validasi sederhana (bisa diperluas atau diganti dengan library)
 const isNonEmptyString = (value: any): value is string => typeof value === 'string' && value.trim() !== '';
@@ -75,34 +79,72 @@ export const searchProducts = async (req: Request, res: Response) => {
 
 // POST /api/products
 export const createProduct = async (req: AuthRequest, res: Response) => {
-    const sellerId = req.userId!;
-    const { name, description, price, stock, category_id, region_id, images, briefHistory, status, cultural_value } = req.body;
-
-    // Validasi Input
-    if (!isNonEmptyString(name)) return res.status(400).json({ message: 'Product name is required.' });
-    if (!isNonEmptyString(description)) return res.status(400).json({ message: 'Product description is required.' });
-    if (!isNumberInRange(price)) return res.status(400).json({ message: 'Price must be a non-negative number.' });
-    if (!isIntegerInRange(stock)) return res.status(400).json({ message: 'Stock must be a non-negative integer.' });
-    if (!isNonEmptyString(category_id)) return res.status(400).json({ message: 'Category ID is required.' });
-    if (!isNonEmptyString(region_id)) return res.status(400).json({ message: 'Region ID is required.' });
-    if (!isStringArray(images)) return res.status(400).json({ message: 'Images must be an array of strings.' });
-    if (!isNonEmptyString(briefHistory)) return res.status(400).json({ message: 'Brief history is required.' });
-    if (status !== undefined && !isValidStatus(status)) return res.status(400).json({ message: "Invalid status value. Must be 'available' or 'unavailable'." });
-    if (cultural_value !== undefined && !isNonEmptyString(cultural_value)) return res.status(400).json({ message: 'Cultural value must be a string if provided.'});
-
-    const productInput: productService.ProductServiceCreationInput = {
-        seller_id: sellerId, name, description, price, stock, category_id, region_id, images, briefHistory,
-        status: status || 'available',
-    };
-    const historyInput: productService.ProductHistoryServiceCreationInput = {
-        title: `${name} History (Creation)`,
-        description: briefHistory,
-        cultural_value: cultural_value || '',
-    };
-
     try {
+        const sellerId = req.userId!;
+        // Sekarang req.body akan terisi berkat multer
+        const {
+            name, description, price, stock, category_id, region_id, briefHistory,
+            status, cultural_value
+        } = req.body;
+
+        // Validasi input dasar
+        if (!name || !description || price === undefined || stock === undefined || !category_id || !region_id || !briefHistory) {
+            return res.status(400).json({ message: 'Missing required text fields.' });
+        }
+
+        let imageUrls: string[] = []; // Default ke array kosong
+
+        // Cek apakah ada file yang diunggah
+        if (req.file) {
+            const file = req.file;
+            const fileName = `${uuidv4()}-${file.originalname.replace(/\s+/g, '_')}`;
+            const filePath = `public/${fileName}`;
+
+            // Unggah file ke Supabase Storage
+            const { data: uploadData, error: uploadError } = await supabase.storage
+                .from(PRODUCT_IMAGES_BUCKET)
+                .upload(filePath, file.buffer, { contentType: file.mimetype });
+
+            if (uploadError) {
+                throw new Error(`Failed to upload product image: ${uploadError.message}`);
+            }
+
+            // Dapatkan URL publik dari file yang diunggah
+            const { data: publicUrlData } = supabase.storage
+                .from(PRODUCT_IMAGES_BUCKET)
+                .getPublicUrl(filePath);
+
+            if (!publicUrlData || !publicUrlData.publicUrl) {
+                throw new Error('Failed to get public URL for product image.');
+            }
+            
+            // Masukkan URL ke dalam array imageUrls
+            imageUrls.push(publicUrlData.publicUrl);
+        }
+        
+        // Buat objek produk untuk dikirim ke service
+        const productInput: productService.ProductServiceCreationInput = {
+            seller_id: sellerId,
+            name,
+            description,
+            price: Number(price), // Konversi ke Angka, karena form-data mengirim semua sebagai string
+            stock: parseInt(stock, 10), // Konversi ke Angka (Integer)
+            category_id,
+            region_id,
+            images: imageUrls, // Gunakan array yang berisi URL dari Supabase
+            briefHistory,
+            status: status || 'available',
+        };
+
+        const historyInput: productService.ProductHistoryServiceCreationInput = {
+            title: `${name} History (Creation)`,
+            description: briefHistory,
+            cultural_value: cultural_value || '',
+        };
+
         const newProduct = await productService.createProduct(productInput, historyInput);
         res.status(201).json(newProduct);
+
     } catch (error: any) {
         console.error('Controller Error - createProduct:', error);
         res.status(500).json({ message: error.message || 'Failed to create product.' });

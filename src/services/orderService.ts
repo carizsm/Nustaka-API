@@ -10,6 +10,7 @@ import {
     Product,
     QueryResult,
     User,
+    BuyerOrderSummary,
     ProductWithId
 } from '../interfaces';
 
@@ -119,19 +120,84 @@ export interface EnrichedOrderWithId extends OrderWithId {
 }
 
 
-export const listOrders = async (buyerId: string): Promise<OrderWithId[]> => { // Belum menyertakan item
-    const snap = await db
-        .collection('orders')
-        .where('buyer_id', '==', buyerId)
+export const listOrders = async (
+    buyerId: string,
+    page: number = 1,
+    limit: number = 10
+): Promise<QueryResult<BuyerOrderSummary>> => {
+    const offset = (page - 1) * limit;
+
+    // Query dasar untuk mengambil order milik buyer
+    const baseQuery = ordersCollection.where('buyer_id', '==', buyerId);
+
+    // Query untuk menghitung total dokumen yang cocok
+    const totalSnap = await baseQuery.get();
+    const total = totalSnap.size;
+
+    // Query untuk mengambil data dengan paginasi dan urutan
+    const dataSnap = await baseQuery
         .orderBy('created_at', 'desc')
+        .offset(offset)
+        .limit(limit)
         .get();
 
-    // Jika ingin menyertakan preview item di sini, perlu query tambahan per order
-    // Untuk saat ini, listOrders hanya mengembalikan data order utama
-    return snap.docs.map(d => ({
-        id: d.id,
-        ...(d.data() as Order)
-    }));
+    if (dataSnap.empty) {
+        return { data: [], total: 0, page, limit };
+    }
+
+    // Proses untuk memperkaya setiap order dengan ringkasan item
+    const enrichmentPromises = dataSnap.docs.map(async (doc): Promise<BuyerOrderSummary> => {
+        const orderData = doc.data() as Order;
+        const orderId = doc.id;
+        
+        let itemsSummary: BuyerOrderSummary['itemsSummary'];
+
+        try {
+            // Ambil hanya satu item pertama dari sub-koleksi untuk mendapatkan nama dan gambar
+            const firstItemSnap = await ordersCollection.doc(orderId).collection('items').limit(1).get();
+            // Ambil semua item untuk mendapatkan jumlah total
+            const allItemsSnap = await ordersCollection.doc(orderId).collection('items').get();
+
+            if (!firstItemSnap.empty) {
+                const firstItemData = firstItemSnap.docs[0].data() as OrderItem;
+                const productId = firstItemData.product_id;
+                
+                let productName = "[Product Deleted]";
+                let productImage: string | undefined = undefined;
+
+                if (productId) {
+                    const productSnap = await productsCollection.doc(productId).get();
+                    if (productSnap.exists) {
+                        const productData = productSnap.data() as Product;
+                        productName = productData.name;
+                        productImage = productData.images?.[0]; // Ambil gambar pertama
+                    }
+                }
+                
+                itemsSummary = {
+                    totalItems: allItemsSnap.size,
+                    firstProductName: productName,
+                    firstProductImage: productImage
+                };
+
+            } else {
+                itemsSummary = { totalItems: 0, firstProductName: "No items", firstProductImage: undefined };
+            }
+        } catch (e) { 
+            console.error(`Failed to fetch items summary for order ${orderId}`, e); 
+            itemsSummary = { totalItems: 0, firstProductName: "[Error]", firstProductImage: undefined };
+        }
+
+        return {
+            id: orderId,
+            ...orderData,
+            itemsSummary: itemsSummary
+        };
+    });
+
+    const data = await Promise.all(enrichmentPromises);
+
+    return { data, total, page, limit };
 };
 
 export const getOrder = async (
@@ -186,99 +252,174 @@ export const getOrder = async (
     };
 };
 
+export interface CheckoutData {
+    shipping_address: string;
+    subtotal_items: number;
+    shipping_cost: number;
+    shipping_insurance_fee: number;
+    application_fee: number;
+    product_discount?: number;
+    shipping_discount?: number;
+    total_amount: number;
+}
+
 export const createOrderFromCart = async (
-  buyerId: string,
-  shippingAddress: string // Parameter baru
+  buyerId: string,
+  checkoutData: CheckoutData
 ): Promise<OrderWithId> => {
-  const cartItemsRef = db.collection('carts').doc(buyerId).collection('items');
-  const cartItemsSnap = await cartItemsRef.get();
+  const cartItemsRef = db.collection('carts').doc(buyerId).collection('items');
+  const cartItemsSnap = await cartItemsRef.get();
 
-  if (cartItemsSnap.empty) {
-    throw new Error('Cart is empty. Cannot create order.');
-  }
+  if (cartItemsSnap.empty) {
+    throw new Error('Cart is empty. Cannot create order.');
+  }
 
-  // Data OrderItem dan referensi dokumen keranjang untuk dihapus nanti
-  const cartItemsData: { id: string, data: CartItem }[] = cartItemsSnap.docs.map(doc => ({
-    id: doc.id,
-    data: doc.data() as CartItem
-  }));
+  const cartItemsData = cartItemsSnap.docs.map(doc => doc.data() as CartItem);
+  const newOrderId = db.collection('orders').doc().id;
 
-  const newOrderId = db.collection('orders').doc().id; // Generate ID order di awal
+  await db.runTransaction(async (tx) => {
+    
+    // --- FASE 1: BACA SEMUA DATA TERLEBIH DAHULU ---
+    
+    const productRefs = cartItemsData.map(item => productsCollection.doc(item.product_id));
+    // tx.getAll() lebih efisien untuk membaca beberapa dokumen sekaligus
+    const productSnaps = await tx.getAll(...productRefs);
 
-  await db.runTransaction(async (tx) => {
-    const orderRef = db.collection('orders').doc(newOrderId);
-    let totalAmount = 0;
-    const orderItemsForCreation: OrderItem[] = [];
+    // --- FASE 2: VALIDASI DATA YANG SUDAH DIBACA ---
 
-    // Iterasi 1: Validasi stok dan siapkan data order item
-    for (const cartDoc of cartItemsData) {
-      const cartItem = cartDoc.data;
-      const productRef = db.collection('products').doc(cartItem.product_id);
-      const productSnap = await tx.get(productRef);
+    let serverCalculatedSubtotal = 0;
+    const sellerIdsInOrder = new Set<string>();
 
-      if (!productSnap.exists) {
-        throw new Error(`Product with ID ${cartItem.product_id} not found.`);
-      }
+    for (let i = 0; i < productSnaps.length; i++) {
+      const productSnap = productSnaps[i];
+      const cartItem = cartItemsData[i];
 
-      const product = productSnap.data() as Product;
-
-      if (product.stock < cartItem.quantity) {
-        throw new Error(
-          `Insufficient stock for product "${product.name}". Available: ${product.stock}, Requested: ${cartItem.quantity}.`
-        );
-      }
-      
-      // Periksa apakah harga per item di keranjang masih valid atau perlu diambil ulang
-      // Untuk implementasi ini, kita asumsikan price_per_item di keranjang sudah final saat ditambahkan
-      if (typeof cartItem.price_per_item !== 'number' || cartItem.price_per_item < 0) {
-        throw new Error(`Invalid price_per_item for product "${product.name}" in cart.`);
+      if (!productSnap.exists) {
+        throw new Error(`Product with ID ${cartItem.product_id} not found.`);
       }
 
+      const product = productSnap.data() as Product;
 
-      // Update stok produk
-      tx.update(productRef, {
-        stock: FieldValue.increment(-cartItem.quantity)
-      });
+      if (product.stock < cartItem.quantity) {
+        throw new Error(`Insufficient stock for product "${product.name}".`);
+      }
+      
+      sellerIdsInOrder.add(product.seller_id);
+      serverCalculatedSubtotal += product.price * cartItem.quantity;
+    }
+    
+    // Validasi subtotal dan total (logika ini tetap sama)
+    if (serverCalculatedSubtotal !== checkoutData.subtotal_items) {
+      throw new Error(`Subtotal mismatch. Client: ${checkoutData.subtotal_items}, Server: ${serverCalculatedSubtotal}.`);
+    }
 
-      // Akumulasi total
-      totalAmount += cartItem.quantity * cartItem.price_per_item;
+    const calculatedTotal = 
+        checkoutData.subtotal_items + 
+        checkoutData.shipping_cost + 
+        checkoutData.shipping_insurance_fee + 
+        checkoutData.application_fee -
+        (checkoutData.product_discount || 0) -
+        (checkoutData.shipping_discount || 0);
 
-      // Siapkan OrderItem
-      orderItemsForCreation.push({
-        product_id: cartItem.product_id,
-        quantity: cartItem.quantity,
-        price_per_item: cartItem.price_per_item
-      });
-    }
+    if (Math.abs(calculatedTotal - checkoutData.total_amount) > 0.01) {
+        throw new Error(`Total amount mismatch. Client: ${checkoutData.total_amount}, Server: ${calculatedTotal}.`);
+    }
 
-    // Buat dokumen Order utama
-    const orderPayload: Order = {
-      buyer_id: buyerId,
-      total_amount: totalAmount,
-      shipping_address: shippingAddress, // Gunakan parameter
-      order_status: 'pending',
-      created_at: FieldValue.serverTimestamp() as admin.firestore.Timestamp, // Gunakan server timestamp
-    };
-    tx.set(orderRef, orderPayload);
+    // --- FASE 3: LAKUKAN SEMUA OPERASI TULIS ---
+    
+    // a. Update stok untuk semua produk
+    productSnaps.forEach((snap, index) => {
+      const cartItem = cartItemsData[index];
+      tx.update(snap.ref, { stock: FieldValue.increment(-cartItem.quantity) });
+    });
 
-    // Buat dokumen OrderItem dalam subcollection
-    for (const orderItemData of orderItemsForCreation) {
-      const orderItemRef = orderRef.collection('items').doc();
-      tx.set(orderItemRef, orderItemData);
-    }
+    // b. Buat dokumen Order utama
+    const orderRef = db.collection('orders').doc(newOrderId);
+    const orderPayload: Order = {
+      buyer_id: buyerId,
+      seller_ids: Array.from(sellerIdsInOrder),
+      shipping_address: checkoutData.shipping_address,
+      order_status: 'pending',
+      subtotal_items: checkoutData.subtotal_items,
+      shipping_cost: checkoutData.shipping_cost,
+      shipping_insurance_fee: checkoutData.shipping_insurance_fee,
+      application_fee: checkoutData.application_fee,
+      product_discount: checkoutData.product_discount || 0,
+      shipping_discount: checkoutData.shipping_discount || 0,
+      total_amount: checkoutData.total_amount,
+      created_at: FieldValue.serverTimestamp() as admin.firestore.Timestamp,
+    };
+    tx.set(orderRef, orderPayload);
 
-    // Kosongkan keranjang (hapus item-item dari subcollection cart)
-    for (const cartDoc of cartItemsData) {
-      tx.delete(cartItemsRef.doc(cartDoc.id));
-    }
-  });
+    // c. Buat dokumen OrderItem
+    const orderItemsForCreation: OrderItem[] = cartItemsData.map(cartItem => ({
+        product_id: cartItem.product_id,
+        quantity: cartItem.quantity,
+        price_per_item: cartItem.price_per_item,
+    }));
 
-  return {
-    id: newOrderId,
-    buyer_id: buyerId,
-    total_amount: (await db.collection('orders').doc(newOrderId).get()).data()?.total_amount, // Re-fetch to be sure, or manage state better
-    shipping_address: shippingAddress,
-    order_status: 'pending',
+    for (const orderItemData of orderItemsForCreation) {
+      const orderItemRef = orderRef.collection('items').doc();
+      tx.set(orderItemRef, orderItemData);
+    }
+    
+    // d. Hapus item dari keranjang
+    for (const doc of cartItemsSnap.docs) {
+      tx.delete(doc.ref);
+    }
+  });
 
-  } as OrderWithId;
+  const createdOrder = await db.collection('orders').doc(newOrderId).get();
+  return { id: newOrderId, ...(createdOrder.data() as Order) } as OrderWithId;
+};
+
+export const listOrdersForSeller = async (
+    sellerId: string,
+    page: number = 1,
+    limit: number = 10
+): Promise<QueryResult<AdminEnrichedOrder>> => {
+    const offset = (page - 1) * limit;
+
+    // Buat query dasar untuk mengambil order yang mengandung sellerId
+    const baseQuery = ordersCollection.where('seller_ids', 'array-contains', sellerId);
+
+    // Query untuk menghitung total dokumen yang cocok
+    const totalSnap = await baseQuery.get();
+    const total = totalSnap.size;
+
+    // Query untuk mengambil data dengan paginasi dan urutan
+    const dataSnap = await baseQuery
+        .orderBy('created_at', 'desc')
+        .offset(offset)
+        .limit(limit)
+        .get();
+
+    // Proses pengayaan data (enrichment) untuk menyertakan info buyer dan item
+    // Logika ini sama persis dengan yang ada di listAllOrders
+    const enrichmentPromises = dataSnap.docs.map(async (doc): Promise<AdminEnrichedOrder> => {
+        // ... (salin seluruh logika map dari fungsi listAllOrders untuk memperkaya data)
+        const orderData = doc.data() as Order;
+        const orderId = doc.id;
+        
+        let buyerInfo;
+        if (orderData.buyer_id && typeof orderData.buyer_id === 'string' && orderData.buyer_id.length > 0) {
+            // ... (logika ambil info buyer)
+        }
+
+        let itemsSummary;
+        try {
+            // ... (logika ambil ringkasan item)
+        } catch (e) { console.error(`Failed to fetch items for order ${orderId}`, e); }
+
+        return {
+            id: orderId,
+            ...orderData,
+            buyerInfo: buyerInfo,
+            itemsSummary: itemsSummary
+        };
+    });
+
+    const data = await Promise.all(enrichmentPromises);
+
+    return { data, total, page, limit };
 };

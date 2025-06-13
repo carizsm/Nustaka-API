@@ -127,9 +127,18 @@ export interface OrderItemWithId extends OrderItem {
 
 export interface Order {
   buyer_id: string;
-  total_amount: number;
+  seller_ids: string[];
   shipping_address: string;
   order_status: 'pending' | 'processing' | 'shipped' | 'delivered' | 'cancelled';
+  subtotal_items: number;           // Subtotal Harga Barang
+  shipping_cost: number;            // Total Ongkos Kirim
+  shipping_insurance_fee: number;   // Asuransi Pengiriman
+  application_fee: number;          // Biaya Jasa Aplikasi
+
+  product_discount?: number;        // Kupon Diskon Barang (opsional)
+  shipping_discount?: number;       // Kupon Diskon Ongkos Kirim (opsional)
+  
+  total_amount: number;             // Total Belanja (hasil akhir kalkulasi)
   created_at: Timestamp;
   updated_at?: Timestamp;
 }
@@ -137,6 +146,14 @@ export interface Order {
 export interface OrderWithId extends Order {
   id: string;
   items?: OrderItemWithId[];
+}
+
+export interface BuyerOrderSummary extends OrderWithId {
+    itemsSummary?: {
+        totalItems: number;
+        firstProductName: string;
+        firstProductImage?: string; // Opsional, untuk ditampilkan di UI
+    };
 }
 
 // Review interface 
