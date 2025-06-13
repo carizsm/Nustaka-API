@@ -279,16 +279,14 @@ export const createOrderFromCart = async (
 
   await db.runTransaction(async (tx) => {
     
-    // --- FASE 1: BACA SEMUA DATA TERLEBIH DAHULU ---
-    
+    // FASE 1: BACA SEMUA DATA PRODUK
     const productRefs = cartItemsData.map(item => productsCollection.doc(item.product_id));
-    // tx.getAll() lebih efisien untuk membaca beberapa dokumen sekaligus
     const productSnaps = await tx.getAll(...productRefs);
 
-    // --- FASE 2: VALIDASI DATA YANG SUDAH DIBACA ---
-
+    // FASE 2: VALIDASI DATA
     let serverCalculatedSubtotal = 0;
     const sellerIdsInOrder = new Set<string>();
+    const productUpdates: { ref: FirebaseFirestore.DocumentReference, update: { stock: any, status?: string } }[] = [];
 
     for (let i = 0; i < productSnaps.length; i++) {
       const productSnap = productSnaps[i];
@@ -306,31 +304,43 @@ export const createOrderFromCart = async (
       
       sellerIdsInOrder.add(product.seller_id);
       serverCalculatedSubtotal += product.price * cartItem.quantity;
+
+      const newStock = product.stock - cartItem.quantity;
+      const updatePayload: { stock: any, status?: string } = {
+          stock: FieldValue.increment(-cartItem.quantity)
+      };
+
+      if (newStock <= 0) {
+          updatePayload.status = 'unavailable';
+      }
+
+      productUpdates.push({ ref: productSnap.ref, update: updatePayload });
     }
     
-    // Validasi subtotal dan total (logika ini tetap sama)
+    // Validasi Subtotal dari klien vs. server
     if (serverCalculatedSubtotal !== checkoutData.subtotal_items) {
       throw new Error(`Subtotal mismatch. Client: ${checkoutData.subtotal_items}, Server: ${serverCalculatedSubtotal}.`);
     }
 
-    const calculatedTotal = 
+    const serverCalculatedTotal = 
         checkoutData.subtotal_items + 
         checkoutData.shipping_cost + 
         checkoutData.shipping_insurance_fee + 
         checkoutData.application_fee -
-        (checkoutData.product_discount || 0) -
+        (checkoutData.product_discount || 0) - // Gunakan 0 jika diskon tidak ada
         (checkoutData.shipping_discount || 0);
+    // ------------------------------------------
 
-    if (Math.abs(calculatedTotal - checkoutData.total_amount) > 0.01) {
-        throw new Error(`Total amount mismatch. Client: ${checkoutData.total_amount}, Server: ${calculatedTotal}.`);
+    // Validasi Total Akhir dari klien vs. server
+    if (Math.abs(serverCalculatedTotal - checkoutData.total_amount) > 0.01) { // Toleransi pembulatan
+        throw new Error(`Total amount mismatch. Client total: ${checkoutData.total_amount}, Server calculated: ${serverCalculatedTotal}.`);
     }
 
-    // --- FASE 3: LAKUKAN SEMUA OPERASI TULIS ---
+    // FASE 3: LAKUKAN SEMUA OPERASI TULIS
     
-    // a. Update stok untuk semua produk
-    productSnaps.forEach((snap, index) => {
-      const cartItem = cartItemsData[index];
-      tx.update(snap.ref, { stock: FieldValue.increment(-cartItem.quantity) });
+    // a. Terapkan semua update produk
+    productUpdates.forEach(pUpdate => {
+        tx.update(pUpdate.ref, pUpdate.update);
     });
 
     // b. Buat dokumen Order utama
@@ -357,7 +367,6 @@ export const createOrderFromCart = async (
         quantity: cartItem.quantity,
         price_per_item: cartItem.price_per_item,
     }));
-
     for (const orderItemData of orderItemsForCreation) {
       const orderItemRef = orderRef.collection('items').doc();
       tx.set(orderItemRef, orderItemData);
